@@ -10,6 +10,9 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+from app.graph.graph import graph
+from app.graph.state import initial_state
+from app.models import Intent
 from app.session_store import store, Session
 
 router = APIRouter()
@@ -107,24 +110,65 @@ async def upload_file(
 
 
 @router.post("/api/chat", response_model=ChatResponse)
-async def chat(
-    body: ChatRequest,
-    session: Session = Depends(lambda: get_session(body.session_id) if False else None),  # 아래에서 직접 처리
-) -> ChatResponse:
+async def chat(body: ChatRequest) -> ChatResponse:
     """사용자 메시지를 받아 LangGraph 그래프를 실행하고 응답을 반환한다.
 
-    Step 8에서 실제 그래프 실행으로 교체 예정.
-    현재는 메시지를 히스토리에 기록하고 더미 응답을 반환한다.
+    TODO(Step 18): SSE 스트리밍으로 교체 예정.
     """
     session = get_session(body.session_id)
     session.add_message("user", body.message)
 
-    # TODO(Step 8): LangGraph 그래프 실행
-    # TODO(Step 18): SSE 스트리밍으로 교체
-    reply = f"[스텁] 메시지 수신: '{body.message}'. 그래프 연동은 Step 8에서 구현 예정."
+    # ── 인텐트 파싱 (스텁: "채우기 시작" 키워드만 인식, Step 13에서 LLM 분류로 교체)
+    intent = _parse_intent_stub(body.message)
+
+    # ── LangGraph 그래프 실행
+    graph_state = dict(session.graph_state) if session.graph_state else initial_state()
+    graph_state["current_intent"] = intent
+    graph_state["form_doc"] = session.form_doc
+    graph_state["material_bundle"] = session.material_bundle
+    graph_state["conversation_history"] = list(session.history)
+
+    config = {"configurable": {"thread_id": body.session_id}}
+    result = graph.invoke(graph_state, config=config)
+
+    # 세션에 그래프 상태 저장
+    session.graph_state = dict(result)
+    session.item_plans = result.get("item_plans", [])
+    session.drafts = result.get("drafts", {})
+
+    approved = result.get("approved_items", [])
+    reply = _build_reply(intent, approved, result)
     session.add_message("assistant", reply)
 
-    return ChatResponse(session_id=body.session_id, reply=reply)
+    return ChatResponse(
+        session_id=body.session_id,
+        reply=reply,
+        intent=intent,
+    )
+
+
+def _parse_intent_stub(message: str) -> str:
+    """키워드 기반 인텐트 스텁 (Step 13에서 LLM 분류로 교체)."""
+    msg = message.strip()
+    if any(k in msg for k in ("채우기 시작", "작성 시작", "시작")):
+        return Intent.START_FILL.value
+    if any(k in msg for k in ("자료 추가", "파일 추가")):
+        return Intent.ADD_MATERIAL.value
+    if any(k in msg for k in ("다시", "재작성", "수정")):
+        return Intent.REWRITE_ITEM.value
+    return Intent.GENERAL_QA.value
+
+
+def _build_reply(intent: str, approved: list, result: dict) -> str:
+    """그래프 실행 결과를 사용자 친화적 메시지로 변환한다 (스텁)."""
+    if intent == Intent.START_FILL.value:
+        total = len(result.get("item_plans", []))
+        return (
+            f"양식 채우기를 완료했습니다. "
+            f"총 {total}개 항목 중 {len(approved)}개를 작성했습니다.\n\n"
+            f"[스텁] Step 10~17 구현 후 실제 초안이 표시됩니다."
+        )
+    return f"[스텁] '{intent}' 인텐트로 처리했습니다."
 
 
 @router.get("/api/download/{session_id}")
