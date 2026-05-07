@@ -10,10 +10,28 @@
 - add_material      : 작성 중 새 자료를 추가하길 원함
 - general_qa        : 양식 관련 일반 질문 (채우기 액션 없음)
 
-출력 형식 (JSON만, 설명 없이):
-{{"intent": "<인텐트>", "confidence": <0.0~1.0>, "target_item": "<항목 번호 또는 null>"}}
+출력 형식 (JSON만, 설명·마크다운 없이):
+{{"intent": "<인텐트>", "confidence": <0.0~1.0>, "target_item": <"항목 번호나 항목명" 또는 null>}}
 
-confidence가 0.6 미만이면 intent를 "disambiguation"으로 설정하세요.
+규칙:
+- confidence가 0.6 미만이면 intent를 "disambiguation"으로 설정하세요.
+- target_item은 항목을 특정할 수 있을 때만 문자열로 채우고, 그렇지 않으면 반드시 null(따옴표 없이)로 설정하세요.
+
+예시:
+  입력: "채우기 시작해줘"
+  출력: {{"intent": "start_fill", "confidence": 0.97, "target_item": null}}
+
+  입력: "3번 항목 다시 써줘"
+  출력: {{"intent": "rewrite_item", "confidence": 0.92, "target_item": "3"}}
+
+  입력: "연구 목표 부분 좀 더 공식적으로 바꿔줘"
+  출력: {{"intent": "change_tone", "confidence": 0.88, "target_item": "연구 목표"}}
+
+  입력: "CV 파일 추가할게요"
+  출력: {{"intent": "add_material", "confidence": 0.95, "target_item": null}}
+
+  입력: "음..."
+  출력: {{"intent": "disambiguation", "confidence": 0.3, "target_item": null}}
 
 ---
 사용자 메시지: {user_message}
