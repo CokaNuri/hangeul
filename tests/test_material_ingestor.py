@@ -35,9 +35,10 @@ class TestTxt:
         doc = ingest_file(text.encode("cp949"), "korean.txt")
         assert "연구 목표" in doc.masked_text
 
-    def test_stub_summary_present(self):
+    def test_summary_empty_after_ingest(self):
+        """파서는 summary를 생성하지 않는다 — LLM 요약은 노드에서 수행."""
         doc = ingest_file(b"some content", "file.txt")
-        assert doc.summary != ""
+        assert doc.summary == ""
 
     def test_empty_file_summary_empty(self):
         doc = ingest_file(b"   ", "empty.txt")

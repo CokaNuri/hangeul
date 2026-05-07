@@ -1,4 +1,4 @@
-"""자료 파싱 + MaterialIngestor — Step 6 스텁 구현.
+"""자료 파싱 + MaterialIngestor — Step 11 업데이트.
 
 사용자가 업로드한 자료 파일(PDF·DOCX·TXT)을 텍스트로 추출하고
 PII 마스킹을 거쳐 MaterialDoc/MaterialBundle을 반환한다.
@@ -6,8 +6,8 @@ PII 마스킹을 거쳐 MaterialDoc/MaterialBundle을 반환한다.
 보안 원칙: PII masker는 반드시 LLM 호출 전에 실행한다.
 이 모듈이 반환하는 MaterialDoc.masked_text만 LLM에 전달할 것.
 
-LLM 기반 문서 요약(summary 필드)은 Step 11에서 구현한다.
-현재는 masked_text 앞부분을 잘라 stub 요약으로 사용한다.
+LLM 기반 문서 요약(summary 필드)은 graph/nodes/material_ingestor.py가 담당한다.
+이 파서는 텍스트 추출과 PII 마스킹만 수행하며, summary는 빈 문자열로 반환한다.
 """
 
 from __future__ import annotations
@@ -16,11 +16,10 @@ import io
 import logging
 
 from app.models import MaterialDoc, MaterialBundle
-from app.pii.regex_masker import mask_text
+from app.pii.masker import mask
 
 logger = logging.getLogger(__name__)
 
-_SUMMARY_STUB_LENGTH = 300   # 스텁 요약: 앞 300자
 _SUPPORTED_EXTS = frozenset(["pdf", "docx", "doc", "txt", "md"])
 
 
@@ -36,7 +35,7 @@ def ingest_file(file_bytes: bytes, filename: str) -> MaterialDoc:
         filename:   원본 파일명 (확장자 추출에 사용)
 
     Returns:
-        MaterialDoc — masked_text는 PII 마스킹 완료. summary는 스텁(Step 11에서 교체).
+        MaterialDoc — masked_text는 PII 마스킹 완료. summary는 "" (노드에서 LLM으로 채움).
 
     Raises:
         ValueError: 지원하지 않는 파일 형식
@@ -48,17 +47,14 @@ def ingest_file(file_bytes: bytes, filename: str) -> MaterialDoc:
     raw_text = _extract_text(file_bytes, ext, filename)
 
     # ── PII 마스킹 (LLM 호출 전 필수) ──────────
-    mask_result = mask_text(raw_text)
+    mask_result = mask(raw_text)
     if mask_result.has_pii:
         logger.info("[PII] '%s'에서 %d개 PII 마스킹 완료", filename, len(mask_result.mask_map))
-
-    # ── 스텁 요약 (Step 11에서 LLM 요약으로 교체) ──
-    summary = _stub_summary(mask_result.masked_text)
 
     return MaterialDoc(
         source_name=filename,
         masked_text=mask_result.masked_text,
-        summary=summary,
+        summary="",   # LLM 요약은 material_ingestor_node에서 생성
         doc_type=ext,
     )
 
@@ -184,13 +180,3 @@ def _get_ext(filename: str) -> str:
     if "." not in filename:
         return "txt"
     return filename.rsplit(".", 1)[-1].lower()
-
-
-def _stub_summary(text: str) -> str:
-    """Step 11 이전의 임시 요약: 앞 300자 발췌."""
-    if not text.strip():
-        return ""
-    truncated = text.strip()[:_SUMMARY_STUB_LENGTH]
-    if len(text.strip()) > _SUMMARY_STUB_LENGTH:
-        truncated += "…"
-    return f"[요약 미생성 — Step 11에서 LLM 요약으로 교체 예정]\n{truncated}"

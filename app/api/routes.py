@@ -13,6 +13,9 @@ from pydantic import BaseModel
 from app.graph.graph import graph
 from app.graph.state import initial_state
 from app.models import Intent
+from app.models import MaterialBundle
+from app.parsers.hwpx_parser import parse_hwpx
+from app.parsers.material_ingestor import ingest_file
 from app.session_store import store, Session
 
 router = APIRouter()
@@ -98,14 +101,36 @@ async def upload_file(
 
     session.uploaded_files.append(file.filename or "unknown")
 
-    # TODO(Step 3): form → HwpxParser 호출
-    # TODO(Step 6): material → MaterialIngestor + PII Masker 호출
+    if file_type == "form":
+        try:
+            session.form_doc = parse_hwpx(content)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"양식 파싱 실패: {exc}",
+            ) from exc
+        item_count = len(session.form_doc.items)
+        msg = f"'{file.filename}' 양식 수신 완료. 빈칸 {item_count}개 식별."
+    else:
+        try:
+            mat_doc = ingest_file(content, file.filename or "unknown")
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"자료 파싱 실패: {exc}",
+            ) from exc
+        # 기존 bundle에 누적 (여러 파일 순차 업로드 지원)
+        if session.material_bundle is None:
+            session.material_bundle = MaterialBundle(docs=[mat_doc])
+        else:
+            session.material_bundle.docs.append(mat_doc)
+        msg = f"'{file.filename}' 자료 수신 완료 (PII 마스킹 적용, 요약은 채우기 시작 시 생성)."
 
     return UploadResponse(
         session_id=session_id,
         file_name=file.filename or "unknown",
         file_type=file_type,
-        message=f"[스텁] '{file.filename}' 수신 완료 ({len(content):,} bytes). 파서 연동은 Step 3/6에서 구현 예정.",
+        message=msg,
     )
 
 

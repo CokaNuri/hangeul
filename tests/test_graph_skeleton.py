@@ -35,8 +35,11 @@ class TestRouting:
         assert result["errors"] == []
 
     def test_upload_form_reaches_end(self, g):
+        hwpx = make_hwpx(paragraphs=["연구 목표", ""], table_rows=None)
+        form_doc = parse_hwpx(hwpx)
         state = initial_state()
         state["current_intent"] = Intent.UPLOAD_FORM.value
+        state["form_doc"] = form_doc
         result = g.invoke(state, config=_cfg("t-uf"))
         assert result["errors"] == []
 
@@ -89,7 +92,7 @@ class TestStartFill:
 
 class TestRewriteItem:
     def test_rewrite_creates_draft(self, g):
-        hwpx = make_hwpx(paragraphs=["연구 목표"])
+        hwpx = make_hwpx(paragraphs=["연구 목표", ""])
         form_doc = parse_hwpx(hwpx)
         target_id = form_doc.items[0].item_id
 

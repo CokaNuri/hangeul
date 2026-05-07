@@ -1,4 +1,4 @@
-"""HWPX 파서 — Step 3 스텁 구현.
+"""HWPX 파서 — Step 10 실제 구현.
 
 HWPX 포맷: ZIP 컨테이너 + XML 섹션 파일
 - mimetype
@@ -19,13 +19,17 @@ HWPX 포맷: ZIP 컨테이너 + XML 섹션 파일
   <hp:tr>  행
   <hp:tc>  셀
 
-빈칸 식별 로직은 Step 10에서 고도화한다.
-현재는 단락·표 구조를 추출하고 FormDoc을 구성하는 것에 집중한다.
+빈칸 식별 기준 (Step 10):
+  1. 빈 단락: <hp:p> 텍스트가 공백만이거나 완전히 없음
+  2. 괄호 패턴: [ ], ( ), □, ___ 등 관용적 빈칸 표기
+  3. 빈 표 셀: <hp:tc> 텍스트가 공백만이거나 없음 (헤더 셀 제외)
+  4. PII 분류: 빈칸의 앞 단락(레이블) 텍스트에 PII 키워드 포함 여부로 판단
 """
 
 from __future__ import annotations
 
 import io
+import re
 import zipfile
 from typing import Any
 
@@ -42,13 +46,21 @@ HS_NS = "http://www.hancom.co.kr/hwpml/2011/section"
 
 NS = {"hp": HP_NS, "hs": HS_NS}
 
-# PII 필드 키워드 (Step 10에서 더 정교화)
+# PII 필드 키워드
 _PII_KEYWORDS = frozenset([
     "성명", "이름", "주민등록번호", "주민번호", "외국인등록번호",
     "연락처", "전화번호", "휴대폰", "이메일", "e-mail",
     "주소", "거주지", "계좌번호", "계좌", "카드번호",
     "학번", "사번", "소속기관", "가족관계",
 ])
+
+# 괄호 빈칸 패턴: [ ], ( ), □, ___ 등
+_BLANK_BRACKET_RE = re.compile(
+    r"(\[[\s　]*\])"      # [ ] — 대괄호 빈칸
+    r"|(\([\s　]*\))"     # ( ) — 소괄호 빈칸
+    r"|(□+)"              # □ — 체크박스 문자
+    r"|(_{3,})"           # ___ — 밑줄 빈칸 (3자 이상)
+)
 
 
 # ──────────────────────────────────────────────
@@ -148,20 +160,29 @@ def _sections_from_hpf(hpf_bytes: bytes, hpf_path: str) -> list[str]:
 def _parse_section_xml(
     raw_xml: bytes, sec_path: str
 ) -> tuple[list[FormItem], list[FormTable]]:
-    """섹션 XML에서 단락 항목과 표 항목을 추출한다."""
+    """섹션 XML에서 빈칸 항목과 표를 추출한다.
+
+    빈칸 감지 기준:
+      - 단락 텍스트가 비어있음 (공백 포함)
+      - 단락 텍스트가 괄호 빈칸 패턴과 일치함 ([ ], □ 등)
+      - 표 셀 텍스트가 비어있음 (헤더 행 제외)
+
+    PII 분류: 빈칸 직전 단락(레이블)의 텍스트에 PII 키워드 포함 여부로 판단.
+    """
     try:
         root = etree.fromstring(raw_xml)
-    except etree.XMLSyntaxError as exc:
+    except etree.XMLSyntaxError:
         return [], []  # 파싱 실패 시 빈 결과 (soft fail)
 
     items: list[FormItem] = []
     tables: list[FormTable] = []
 
-    # ── 최상위 단락 수집 (표 안 단락 제외)
-    tbl_set = set(root.iter(f"{{{HP_NS}}}tbl"))
+    # ── 최상위 단락 수집 (표 안 단락 제외) ────────────────
     para_index = 0
+    prev_label = ""  # 직전 비어있지 않은 단락 텍스트 (빈칸의 레이블 후보)
+
     for para in root.iter(f"{{{HP_NS}}}p"):
-        # 표 셀 안 단락은 별도 처리하므로 건너뜀
+        # 표 셀 안 단락은 표 처리 루프에서 별도로 다룸
         parent = para.getparent()
         if parent is not None and parent.tag == f"{{{HP_NS}}}tc":
             continue
@@ -169,29 +190,54 @@ def _parse_section_xml(
         text = _para_text(para)
         item_id = f"{sec_path}::p{para_index}"
 
-        item_type = _classify_item_type(text)
-        items.append(FormItem(
-            item_id=item_id,
-            label=text[:40] if text else f"단락 {para_index}",
-            item_type=item_type,
-            xml_path=item_id,   # Step 10에서 실제 XPath로 교체
-            context=text,
-        ))
+        if _is_blank_text(text):
+            # 빈칸 단락 → FormItem 생성
+            label = prev_label or f"항목 {para_index}"
+            item_type = _classify_item_type(label)
+            items.append(FormItem(
+                item_id=item_id,
+                label=label[:40],
+                item_type=item_type,
+                xml_path=item_id,
+                context=prev_label,
+            ))
+        else:
+            # 비어있지 않은 단락 → 다음 빈칸의 레이블 후보로 기억
+            prev_label = text
+
         para_index += 1
 
-    # ── 표 수집
+    # ── 표 수집 + 빈 셀 FormItem 생성 ─────────────────────
     tbl_index = 0
     for tbl in root.iter(f"{{{HP_NS}}}tbl"):
         table_id = f"{sec_path}::tbl{tbl_index}"
         header_row: list[str] = []
         data_rows: list[list[str]] = []
 
-        for row_i, tr in enumerate(tbl.findall(f"{{{HP_NS}}}tr")):
+        all_rows = tbl.findall(f"{{{HP_NS}}}tr")
+        for row_i, tr in enumerate(all_rows):
             cells = [_cell_text(tc) for tc in tr.findall(f"{{{HP_NS}}}tc")]
             if row_i == 0:
                 header_row = cells
-            else:
-                data_rows.append(cells)
+                continue  # 헤더 행은 빈칸 감지 대상에서 제외
+            data_rows.append(cells)
+
+            # 헤더 첫 열(행 레이블)을 제외하고 빈 셀을 FormItem으로 추가
+            row_header = cells[0] if cells else ""
+            for col_i, cell_text in enumerate(cells):
+                if col_i == 0:
+                    continue  # 첫 번째 셀은 행 레이블 → 건너뜀
+                if _is_blank_text(cell_text):
+                    col_header = header_row[col_i] if col_i < len(header_row) else f"열{col_i}"
+                    label = f"{row_header} / {col_header}" if row_header else col_header
+                    cell_id = f"{table_id}::r{row_i}c{col_i}"
+                    items.append(FormItem(
+                        item_id=cell_id,
+                        label=label[:40],
+                        item_type=_classify_item_type(label),
+                        xml_path=cell_id,
+                        context=str(header_row),
+                    ))
 
         tables.append(FormTable(
             table_id=table_id,
@@ -222,9 +268,20 @@ def _cell_text(tc_elem) -> str:
     return " ".join(p for p in parts if p)
 
 
-def _classify_item_type(text: str) -> ItemType:
-    """텍스트에서 PII 필드 여부를 판별한다 (Step 10에서 정교화)."""
-    lower = text.lower()
+def _is_blank_text(text: str) -> bool:
+    """텍스트가 빈칸(공백 전용 또는 괄호 빈칸 패턴)인지 판별한다."""
+    stripped = text.strip()
+    if not stripped:
+        return True
+    return bool(_BLANK_BRACKET_RE.fullmatch(stripped) or _BLANK_BRACKET_RE.search(stripped) and stripped == _BLANK_BRACKET_RE.search(stripped).group())
+
+
+def _classify_item_type(label: str) -> ItemType:
+    """레이블 텍스트로 PII 필드 여부를 판별한다.
+
+    빈칸 자체가 아닌 레이블(앞 단락 텍스트 또는 열·행 헤더)을 기준으로 분류.
+    """
+    lower = label.lower()
     for keyword in _PII_KEYWORDS:
         if keyword in lower:
             return ItemType.PII
