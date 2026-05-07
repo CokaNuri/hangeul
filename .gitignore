@@ -1,0 +1,38 @@
+# 환경 변수 (절대 커밋 금지)
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 업로드 임시 파일 (세션 메모리 온리 원칙)
+/tmp/
+/uploads/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Claude Code 로컬 설정 (커밋 불필요)
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# spaCy 모델 캐시
+/models/

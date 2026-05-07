@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hwp-agent"
+version = "0.1.0"
+description = "국가지원사업 .hwpx 양식 자동 작성 AI 어시스턴트"
+requires-python = ">=3.11"
+dependencies = [
+    # Web framework
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sse-starlette>=2.1",
+    "python-multipart>=0.0.9",
+    "httpx>=0.27",
+
+    # AI orchestration
+    "langgraph>=0.2",
+    "langchain-core>=0.3",
+
+    # LLM client
+    "openai>=1.40",          # Upstage Solar은 OpenAI-compatible API 사용
+
+    # HWPX parsing (ZIP + XML)
+    "lxml>=5.2",
+
+    # Document parsing
+    "pypdf>=4.3",
+    "pdfplumber>=0.11",
+    "python-docx>=1.1",
+
+    # PII masking
+    "presidio-analyzer>=2.2",
+    "presidio-anonymizer>=2.2",
+    "spacy>=3.7",
+
+    # Frontend
+    "streamlit>=1.36",
+
+    # Utilities
+    "python-dotenv>=1.0",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "tenacity>=8.5",          # 지수 백오프 재시도
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "httpx>=0.27",            # FastAPI TestClient
+    "ruff>=0.5",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*", "frontend*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
