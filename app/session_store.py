@@ -37,6 +37,10 @@ class Session:
     # LangGraph 체크포인트 (그래프 재개용)
     graph_state: dict[str, Any] = field(default_factory=dict)
 
+    # interrupt 상태 (Step 16)
+    is_interrupted: bool = False        # True이면 다음 메시지를 Command(resume=...) 로 처리
+    pending_question: str = ""          # interrupt가 전달한 질문 텍스트
+
     # 업로드된 원본 파일명 목록 (참고용)
     uploaded_files: list[str] = field(default_factory=list)
 
@@ -62,6 +66,8 @@ class Session:
         self.history.clear()
         self.graph_state.clear()
         self.uploaded_files.clear()
+        self.is_interrupted = False
+        self.pending_question = ""
 
 
 class SessionStore:

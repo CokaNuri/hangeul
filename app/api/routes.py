@@ -1,7 +1,9 @@
-"""FastAPI 라우터 — 스켈레톤 엔드포인트 (Step 2).
+"""FastAPI 라우터 — Step 16: interrupt/resume 지원 추가.
 
-각 엔드포인트는 Step 8~18에서 실제 LangGraph 로직으로 교체된다.
-지금은 세션 관리와 요청/응답 스키마만 확정한다.
+human-in-the-loop 흐름:
+  1. graph.invoke(state) → result["__interrupt__"] 있으면 세션에 질문 저장
+  2. 다음 chat 요청 시 session.is_interrupted=True → graph.invoke(Command(resume=answer))
+  3. 그래프가 question_node에서 재개 → generator 진행
 """
 
 from __future__ import annotations
@@ -10,10 +12,18 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+from langgraph.types import Command
+
+from app.cesp import (
+    emit,
+    CATEGORY_SESSION_START,
+    CATEGORY_TASK_ACKNOWLEDGE,
+    CATEGORY_TASK_COMPLETE,
+    CATEGORY_TASK_ERROR,
+)
 from app.graph.graph import graph
 from app.graph.state import initial_state
-from app.models import Intent
-from app.models import MaterialBundle
+from app.models import Intent, MaterialBundle
 from app.parsers.hwpx_parser import parse_hwpx
 from app.parsers.material_ingestor import ingest_file
 from app.session_store import store, Session
@@ -49,6 +59,7 @@ class ChatResponse(BaseModel):
     session_id: str
     reply: str
     intent: str = "unknown"
+    pending_question: str = ""   # 비어 있지 않으면 UI가 사용자 입력 대기 표시
 
 
 class UploadResponse(BaseModel):
@@ -71,6 +82,7 @@ async def health() -> dict:
 async def create_session() -> SessionResponse:
     """새 세션을 생성하고 session_id를 반환한다."""
     session = store.create()
+    emit(CATEGORY_SESSION_START)
     return SessionResponse(session_id=session.session_id)
 
 
@@ -87,11 +99,7 @@ async def upload_file(
     file: UploadFile = File(...),
     session: Session = Depends(get_session),
 ) -> UploadResponse:
-    """양식(.hwpx) 또는 자료 파일을 업로드한다.
-
-    Step 3, 6에서 실제 파서 연동으로 교체 예정.
-    현재는 파일 수신만 확인하고 파일명을 세션에 기록한다.
-    """
+    """양식(.hwpx) 또는 자료 파일을 업로드한다."""
     if file_type not in ("form", "material"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="file_type은 'form' 또는 'material'이어야 합니다.")
 
@@ -119,7 +127,6 @@ async def upload_file(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"자료 파싱 실패: {exc}",
             ) from exc
-        # 기존 bundle에 누적 (여러 파일 순차 업로드 지원)
         if session.material_bundle is None:
             session.material_bundle = MaterialBundle(docs=[mat_doc])
         else:
@@ -138,42 +145,77 @@ async def upload_file(
 async def chat(body: ChatRequest) -> ChatResponse:
     """사용자 메시지를 받아 LangGraph 그래프를 실행하고 응답을 반환한다.
 
+    interrupt 처리:
+      - session.is_interrupted=True → Command(resume=message) 로 그래프 재개
+      - 결과에 __interrupt__ 있으면 다음 응답 대기 상태로 전환
+
     TODO(Step 18): SSE 스트리밍으로 교체 예정.
     """
     session = get_session(body.session_id)
     session.add_message("user", body.message)
-
-    # ── 인텐트 파싱 (스텁: "채우기 시작" 키워드만 인식, Step 13에서 LLM 분류로 교체)
-    intent = _parse_intent_stub(body.message)
-
-    # ── LangGraph 그래프 실행
-    graph_state = dict(session.graph_state) if session.graph_state else initial_state()
-    graph_state["current_intent"] = intent
-    graph_state["form_doc"] = session.form_doc
-    graph_state["material_bundle"] = session.material_bundle
-    graph_state["conversation_history"] = list(session.history)
+    emit(CATEGORY_TASK_ACKNOWLEDGE)
 
     config = {"configurable": {"thread_id": body.session_id}}
-    result = graph.invoke(graph_state, config=config)
+    intent = "unknown"
 
-    # 세션에 그래프 상태 저장
-    session.graph_state = dict(result)
+    try:
+        if session.is_interrupted:
+            # ── interrupt 재개 경로 ───────────────────
+            result = graph.invoke(Command(resume=body.message), config=config)
+            intent = result.get("current_intent", "unknown")
+        else:
+            # ── 신규 호출 경로 ───────────────────────
+            intent = _parse_intent_stub(body.message)
+            graph_state = dict(session.graph_state) if session.graph_state else initial_state()
+            graph_state["current_intent"] = intent
+            graph_state["form_doc"] = session.form_doc
+            graph_state["material_bundle"] = session.material_bundle
+            graph_state["conversation_history"] = list(session.history)
+            result = graph.invoke(graph_state, config=config)
+
+    except Exception:
+        emit(CATEGORY_TASK_ERROR)
+        raise
+
+    # ── 결과 저장 ────────────────────────────────
+    session.graph_state = {k: v for k, v in result.items() if k != "__interrupt__"}
     session.item_plans = result.get("item_plans", [])
     session.drafts = result.get("drafts", {})
+
+    # ── interrupt 여부 판단 ──────────────────────
+    interrupt_list = result.get("__interrupt__") or []
+    if interrupt_list:
+        question_text = str(interrupt_list[0].value)
+        session.is_interrupted = True
+        session.pending_question = question_text
+        reply = f"추가 정보가 필요합니다.\n\n{question_text}"
+        session.add_message("assistant", reply)
+        return ChatResponse(
+            session_id=body.session_id,
+            reply=reply,
+            intent=intent,
+            pending_question=question_text,
+        )
+
+    # ── 정상 완료 ────────────────────────────────
+    session.is_interrupted = False
+    session.pending_question = ""
 
     approved = result.get("approved_items", [])
     reply = _build_reply(intent, approved, result)
     session.add_message("assistant", reply)
+    emit(CATEGORY_TASK_COMPLETE)
 
     return ChatResponse(
         session_id=body.session_id,
         reply=reply,
         intent=intent,
+        pending_question="",
     )
 
 
 def _parse_intent_stub(message: str) -> str:
-    """키워드 기반 인텐트 스텁 (Step 13에서 LLM 분류로 교체)."""
+    """키워드 기반 인텐트 스텁 (Step 13에서 LLM 분류로 교체 예정)."""
     msg = message.strip()
     if any(k in msg for k in ("채우기 시작", "작성 시작", "시작")):
         return Intent.START_FILL.value
@@ -185,27 +227,21 @@ def _parse_intent_stub(message: str) -> str:
 
 
 def _build_reply(intent: str, approved: list, result: dict) -> str:
-    """그래프 실행 결과를 사용자 친화적 메시지로 변환한다 (스텁)."""
+    """그래프 실행 결과를 사용자 친화적 메시지로 변환한다."""
     if intent == Intent.START_FILL.value:
         total = len(result.get("item_plans", []))
         return (
             f"양식 채우기를 완료했습니다. "
-            f"총 {total}개 항목 중 {len(approved)}개를 작성했습니다.\n\n"
-            f"[스텁] Step 10~17 구현 후 실제 초안이 표시됩니다."
+            f"총 {total}개 항목 중 {len(approved)}개를 작성했습니다."
         )
-    return f"[스텁] '{intent}' 인텐트로 처리했습니다."
+    return f"'{intent}' 요청을 처리했습니다."
 
 
 @router.get("/api/download/{session_id}")
 async def download(session_id: str) -> Response:
-    """완성된 .hwpx 파일을 반환한다.
+    """완성된 .hwpx 파일을 반환한다. (Step 17에서 실제 렌더러 연동 예정)"""
+    get_session(session_id)
 
-    Step 17에서 실제 렌더러 연동으로 교체 예정.
-    현재는 더미 bytes를 반환한다.
-    """
-    session = get_session(session_id)
-
-    # TODO(Step 17): Renderer가 생성한 hwpx bytes 반환
     dummy_bytes = b"HWPX_STUB"
     filename = "output_stub.hwpx"
 
