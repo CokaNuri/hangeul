@@ -37,6 +37,9 @@ class GraphState(TypedDict, total=False):
     pending_question: str              # Question 노드가 설정
     user_answer: str                   # interrupt 재개 시 채워짐
 
+    # ── Verifier 결과 ────────────────────────────
+    verifier_verdict: str              # "ok" | "retry" — _route_verifier가 읽음
+
     # ── 에러 ────────────────────────────────────
     errors: list[str]
 
@@ -57,5 +60,6 @@ def initial_state() -> GraphState:
         conversation_history=[],
         pending_question="",
         user_answer="",
+        verifier_verdict="ok",
         errors=[],
     )
